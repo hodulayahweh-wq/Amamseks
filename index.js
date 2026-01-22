@@ -8,7 +8,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const API_URL = 'http://45.81.113.22/apiler/aile.php';
-const TC_FILE = path.join(__dirname, 'blog.txt'); // Dosya adını buraya yaz (blog.txt veya sahte_tcx_1200000.txt)
+const TC_FILE = path.join(__dirname, 'BARBİ.txt'); // Dosya adını buraya yaz (blog.txt veya sahte_tcx_1200000.txt)
 
 const TELEGRAM_BOT_TOKEN = '8232579729:AAEPjPqCN33b-cQzDLKdeSatK8oi_b44vDo';
 const TELEGRAM_CHAT_ID = '8258235296';
